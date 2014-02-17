@@ -241,6 +241,9 @@ threadTreeVar :: MVar (Map.Map ThreadId (ThreadId, ThreadId))
 {-# NOINLINE threadTreeVar #-}
 threadTreeVar = unsafePerformIO (newMVar Map.empty)
 
+-- note: while tree killing prevents the need to catch and propogate exceptions
+-- for unamb's sake, we still need to catch exceptions that arise for other reasons,
+-- e.g. keyboard interrupt. 
 race a b = do
     result <- newEmptyMVar
     ready <- newEmptyMVar :: IO (MVar ())
