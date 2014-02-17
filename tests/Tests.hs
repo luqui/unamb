@@ -18,7 +18,6 @@ import Test.QuickCheck.Later
 
 import Data.Unamb
 
-import System.IO.Unsafe
 import Control.Concurrent
 
 main :: IO ()
@@ -26,7 +25,7 @@ main = quickBatch batch
 
 
 batch :: TestBatch
-batch = ( "FRP.Reactive.Unamb"
+batch = ( "Data.Unamb"
         , [ ("both identity", bothId                unambt undefined)
           , ("idempotence"  , idempotent2           unambt)
           , ("commutative"  , isCommutTimes 0.00001 unambt)
@@ -43,7 +42,7 @@ batch = ( "FRP.Reactive.Unamb"
    unambt :: NumT -> NumT -> NumT
    unambt = unamb
    -- For the recursive tests
-   x = unsafePerformIO (threadDelay 100000 >> return (42::Int))
+   x = restartingUnsafePerformIO (threadDelay 100000 >> return (42::Int))
    a = unamb x undefined
    b = unamb 30 a
 

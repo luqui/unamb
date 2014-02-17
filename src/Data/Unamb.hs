@@ -1,4 +1,4 @@
-{-# LANGUAGE ScopedTypeVariables, CPP, DeriveDataTypeable #-}
+{-# LANGUAGE ScopedTypeVariables, CPP, DeriveDataTypeable, RecursiveDo #-}
 {-# OPTIONS_GHC -Wall #-}
 ----------------------------------------------------------------------
 -- |
@@ -33,6 +33,7 @@ module Data.Unamb
   , amb, amb', race
     -- * Exception thrown if neither value evaluates
   , BothBottom
+  , restartingUnsafePerformIO
   ) where
 
 import Prelude
@@ -41,6 +42,9 @@ import Control.Monad.Instances () -- for function functor
 import Control.Concurrent
 import Control.Exception hiding (unblock)
 import Data.Typeable
+import qualified Control.Monad.Trans.State as State
+import Control.Monad.IO.Class (liftIO)
+import qualified Data.Map as Map
 
 -- Drop the unsafeIsEvaluated optimization for now.  See comments below.
 
@@ -48,6 +52,8 @@ import Data.Typeable
 -- import Data.IsEvaluated
 
 -- Temporary def until I know how to detect and handle evaluated-as-bottom values.
+--    NOTE (luqui): Can't we try to evaluate it again (knowing it's already evaluated, 
+--      so cheap-ish) and catch the exception?
 unsafeIsEvaluated :: a -> Bool
 unsafeIsEvaluated = const False
 
@@ -216,18 +222,73 @@ race :: IO a -> IO a -> IO a
 -- This version kills descendant threads when killed, but does not restart
 -- any work if it's called by unamb. That code is left in unamb.
 
-race a b = mask_ $ do
-  v <- newEmptyMVar
-  let f x = forkIO $ putCatch (mask_ x) v
-  ta <- f a
-  tb <- f b
-  let cleanup = throwTo ta DontBother >> throwTo tb DontBother
-      loop 0 = throwIO BothBottom
-      loop t = do x <- takeMVar v
-                  case x of Nothing -> loop (t-1)
-                            Just x' -> return x'
-  mask_ (loop (2 :: Int) `finally` cleanup)
+-- race a b = mask_ $ do
+--   v <- newEmptyMVar
+--   let f x = forkIO $ putCatch (mask_ x) v
+--   ta <- f a
+--   tb <- f b
+--   let cleanup = do
+--         throwTo ta DontBother
+--         throwTo tb DontBother
+--       loop 0 = do
+--         throwIO BothBottom
+--       loop t = do x <- takeMVar v
+--                   case x of Nothing -> loop (t-1)
+--                             Just x' -> return x'
+--   mask_ (loop (2 :: Int) `finally` cleanup)
 
+threadTreeVar :: MVar (Map.Map ThreadId (ThreadId, ThreadId))
+{-# NOINLINE threadTreeVar #-}
+threadTreeVar = unsafePerformIO (newMVar Map.empty)
+
+race a b = do
+    result <- newEmptyMVar
+    ready <- newEmptyMVar :: IO (MVar ())
+    threadTree <- takeMVar threadTreeVar
+    rec ta <- forkIO (do readMVar ready; putCatch a result)
+        tb <- forkIO (do readMVar ready; putCatch b result)
+    me <- myThreadId
+    putMVar threadTreeVar (Map.insert me (ta, tb) threadTree)
+    putMVar ready ()
+    let cleanup = do
+            killTree ta
+            killTree tb
+        loop 0 = throwIO BothBottom
+        loop t = maybe (loop (t-1)) return =<< takeMVar result
+    loop (2 :: Int) `finally'` cleanup
+
+-- Unnecessary to be thread-safe because of single-threaded tree kill.
+finally' :: (Monad m) => m a -> m () -> m a
+finally' a b = do x <- a; b; return x
+
+killTree :: ThreadId -> IO ()
+killTree = \tid -> do
+    threadTree <- takeMVar threadTreeVar
+    ((), threadTree') <- State.runStateT (killTree' tid) threadTree
+    putMVar threadTreeVar threadTree'
+    where
+    killTree' tid = do
+        children <- State.gets (tid `Map.lookup`)
+        State.modify (Map.delete tid)
+        case children of
+            Nothing -> return ()
+            Just (tidl, tidr) -> do
+                killTree' tidl
+                killTree' tidr
+        liftIO $ killThread tid  -- TODO should be throwTo _ DontBother
+                                 -- but that spews error messages
+    
+exceptionSwallows :: [Handler ()]
+exceptionSwallows = 
+    [ Handler $ \ ErrorCall         {} -> return ()
+    , Handler $ \ BothBottom        {} -> return ()
+    , Handler $ \ PatternMatchFail  {} -> return ()
+    , Handler $ \ DontBother        {} -> return ()
+    -- This next handler hides bogus black holes, which show up as
+    -- "<<loop>>" messages.  I'd rather eliminate the problem than hide it.
+    -- TODO: Remove and stress-test (e.g., reactive-fieldtrip)
+    , Handler $ \ NonTermination    -> print "Unamb.hs: Bogus black hole?" >> throwIO NonTermination
+    ]
 
 -- A thread can bottom-out efficiently by throwing that exception.
 -- Before a thread bails out for any reason, it informs race of its bailing out.
@@ -238,16 +299,8 @@ race a b = mask_ $ do
 -- We suppress error-printing for.. what, exactly? When should we *not* do it?
 -- Using old code for now.
 putCatch :: IO a -> MVar (Maybe a) -> IO ()
-putCatch act v = onException (act >>= putMVar v . Just) (putMVar v Nothing) `catches`
-                 [ Handler $ \ ErrorCall         {} -> return ()
-                 , Handler $ \ BothBottom        {} -> return ()
-                 , Handler $ \ PatternMatchFail  {} -> return ()
-                 , Handler $ \ DontBother        {} -> return ()
-                 -- This next handler hides bogus black holes, which show up as
-                 -- "<<loop>>" messages.  I'd rather eliminate the problem than hide it.
-                 -- TODO: Remove and stress-test (e.g., reactive-fieldtrip)
-                 , Handler $ \ NonTermination    -> print "Unamb.hs: Bogus black hole?" >> throwIO NonTermination
-                 ]
+putCatch act v = onException (act >>= putMVar v . Just) (putMVar v Nothing) `catches` exceptionSwallows
+                 
 
 
 -- | Yield a value if a condition is true.  Otherwise undefined.

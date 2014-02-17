@@ -8,8 +8,6 @@
 -- the mapM_ test printed consecutive natural numbers for a while, and
 -- then got stuck.  Seemed to run fine without -threaded/N2
 
-import Prelude hiding (catch)
-
 import Data.Unamb
 
 import System.IO.Unsafe
@@ -23,7 +21,7 @@ test x = f (f x) where f v = (x `unamb` v) `seq` v
 main :: IO ()
 -- main = print sparse
 
-main = mapM_ (print . test) [0..]
+main = mapM_ (print . test) [0..10^5]
 
 
 -- Luke Palmer's stress test
