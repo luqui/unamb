@@ -1,10 +1,11 @@
 module Main where
 
-import Control.Monad (forM_)
+import Control.Monad (forM)
 import Data.Unamb
 import Data.Time.Clock (getCurrentTime, diffUTCTime)
 import Control.Concurrent
 import Control.Concurrent.MVar
+import System.Exit (exitWith, ExitCode(..))
 
 undefinedList :: Int -> ()
 undefinedList n = unambs (replicate n undefined ++ [()] ++ replicate n undefined)
@@ -33,5 +34,9 @@ tests = [
     ("hard 10", runsIn 5 (hard 10)) ]
 
 main = do
-    forM_ tests $ \(name, test) -> do
-        putStrLn . ((name ++ ": ") ++) . show =<< test
+    results <- forM tests $ \(name, test) -> do
+        result <- test
+        putStrLn . ((name ++ ": ") ++) . show $ result
+        return result
+    exitWith $ if and results then ExitSuccess
+                              else ExitFailure 1
